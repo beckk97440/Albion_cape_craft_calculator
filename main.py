@@ -112,6 +112,8 @@ def main():
         row = get_row_from_cape_id(cape_id, base_cape_prices, crest_prices, heart_prices, cape_prices)
         if row is not None:
             print(row)
+            #Comment
+            
 
 
 

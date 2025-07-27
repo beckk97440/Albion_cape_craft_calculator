@@ -98,7 +98,7 @@ def get_row_from_cape_id(cape_id, base_cape_prices, crest_prices, heart_prices, 
     total_price = get_total_cost(base_cape_price, crest_price, heart_price, heart_quantity)
     profit = get_profit(cape_price, base_cape_price, crest_price, heart_price, heart_quantity)
     profit_percent = get_profit_percentage(cape_price, base_cape_price, crest_price, heart_price, heart_quantity)
-    return [cape_id, total_price, profit, profit_percent]
+    return [crest_price, heart_price, base_cape_price, total_price, profit, profit_percent]
 
 
     

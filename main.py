@@ -1,5 +1,4 @@
 import requests
-import sys
 from items_functions import get_cape_data_by_id, get_cape_data_by_name,get_cape_id_by_name, ALL_CAPE_ITEMS
 
 BASE_URL = "https://europe.albion-online-data.com/api/v2/stats/prices/"

@@ -82,37 +82,6 @@ def calc_roi(cape_price: int, base_cape_price: int, crest_price: int, heart_pric
     return round((profit_after_tax / total) * 100, 2)
 
 
-def build_row_for_cape(
-    cape_id: str,
-    base_cape_prices: dict,
-    crest_prices: dict,
-    heart_prices: dict,
-    cape_prices: dict,
-    taxes: float,
-) -> list:
-    base_cape_id = ""
-    crest_id = ""
-    heart_id = ""
-    heart_quantity = 1
-    for name, data in ALL_CAPE_ITEMS.items():
-        if get_cape_id_by_name(name) == cape_id:
-            base_cape_id = data["base_cape"]
-            crest_id = data["crest"]
-            heart_id = data["heart"]["id"]
-            heart_quantity = data["heart"].get("quantity", 1)
-            break
-
-    base_cape_price = int(base_cape_prices.get(base_cape_id, 0) or 0)
-    crest_price = int(crest_prices.get(crest_id, 0) or 0)
-    heart_price = int(heart_prices.get(heart_id, 0) or 0)
-    cape_price = int(cape_prices.get(cape_id, 0) or 0)
-
-    total = get_total_cost(base_cape_price, crest_price, heart_price, heart_quantity)
-    profit = calc_profit(cape_price, base_cape_price, crest_price, heart_price, heart_quantity, taxes)
-    roi = calc_roi(cape_price, base_cape_price, crest_price, heart_price, heart_quantity, taxes)
-    return [cape_price, crest_price, heart_price, heart_quantity, base_cape_price, total, profit, roi]
-
-
 class AlbionCapeCalculatorApp:
     CITY_CHOICES = [
         "Lymhurst",
@@ -128,7 +97,7 @@ class AlbionCapeCalculatorApp:
         self.root = root
         self.root.title("Albion Cape Profit Calculator")
         self.root.geometry("1100x700")
-        self.root.minsize(960, 640)
+        self.root.minsize(1560, 640)
 
         # State
         self.selected_item = tk.StringVar(value=SELECTED_ITEM)
@@ -138,11 +107,20 @@ class AlbionCapeCalculatorApp:
         self.taxes_var = tk.DoubleVar(value=TAXES)
 
         self.current_image: tk.PhotoImage | None = None
+        self.use_buy_prices_var = tk.BooleanVar(value=False)  # toggle for city markets
+
+        # Latest fetched data caches
+        self.last_cape_ids: list[str] = []
+        self.last_cape_prices: dict[str, int] = {}
+        self.last_base_prices: dict[str, int] = {}
+        self.last_crest_prices: dict[str, int] = {}
+        self.last_heart_prices: dict[str, int] = {}
+        # Manual overrides per row
+        self.manual_overrides: dict[str, dict[str, int | None]] = {}
 
         self._setup_style()
         self._build_layout()
         self._wire_events()
-
         self.refresh_data()
 
     def _setup_style(self):
@@ -208,6 +186,16 @@ class AlbionCapeCalculatorApp:
         self.heart_combo["values"] = self.CITY_CHOICES
         self.heart_combo.grid(row=0, column=5, padx=(8, 16), sticky="w")
 
+        # Price source toggle (city markets)
+        ttk.Label(row2, text="City Price Source").grid(row=0, column=6, sticky="e", padx=(24, 8))
+        self.price_source_toggle = ttk.Checkbutton(
+            row2,
+            text="Use Buy Orders",
+            variable=self.use_buy_prices_var,
+            command=self.refresh_data,
+        )
+        self.price_source_toggle.grid(row=0, column=7, sticky="w")
+
         # Status
         self.status_var = tk.StringVar(value="Ready")
         self.status_label = ttk.Label(self.root, textvariable=self.status_var, anchor="w")
@@ -221,7 +209,9 @@ class AlbionCapeCalculatorApp:
             "name",
             "cape_price",
             "crest_price",
+            "crest_manual",
             "heart_price",
+            "heart_manual",
             "heart_qty",
             "base_cape_price",
             "total_cost",
@@ -233,6 +223,8 @@ class AlbionCapeCalculatorApp:
         self.tree.heading("cape_price", text="BM Sell Price", command=lambda: self._sort_by("cape_price", False))
         self.tree.heading("crest_price", text="Crest", command=lambda: self._sort_by("crest_price", False))
         self.tree.heading("heart_price", text="Heart", command=lambda: self._sort_by("heart_price", False))
+        self.tree.heading("crest_manual", text="Crest Manual", command=lambda: self._sort_by("crest_manual", False))
+        self.tree.heading("heart_manual", text="Heart Manual", command=lambda: self._sort_by("heart_manual", False))
         self.tree.heading("heart_qty", text="Heart x", command=lambda: self._sort_by("heart_qty", False))
         self.tree.heading("base_cape_price", text="Base Cape", command=lambda: self._sort_by("base_cape_price", False))
         self.tree.heading("total_cost", text="Total Cost", command=lambda: self._sort_by("total_cost", False))
@@ -243,6 +235,8 @@ class AlbionCapeCalculatorApp:
         self.tree.column("cape_price", width=130, anchor="e")
         self.tree.column("crest_price", width=110, anchor="e")
         self.tree.column("heart_price", width=110, anchor="e")
+        self.tree.column("crest_manual", width=120, anchor="e")
+        self.tree.column("heart_manual", width=120, anchor="e")
         self.tree.column("heart_qty", width=80, anchor="center")
         self.tree.column("base_cape_price", width=120, anchor="e")
         self.tree.column("total_cost", width=120, anchor="e")
@@ -261,6 +255,7 @@ class AlbionCapeCalculatorApp:
         self.tree.tag_configure("profit_pos", foreground="#0a7f2e")
         self.tree.tag_configure("profit_neg", foreground="#b00020")
         self.tree.tag_configure("odd", background="#f8f9fb")
+        self.tree.bind("<Double-1>", self._begin_cell_edit)
 
     def _wire_events(self):
         self.item_combo.bind("<<ComboboxSelected>>", lambda e: self._on_item_change())
@@ -280,7 +275,6 @@ class AlbionCapeCalculatorApp:
         self.refresh_data()
 
     def _get_item_choices(self) -> list[str]:
-        # Show all names from img folder
         try:
             img_names = [
                 os.path.splitext(f)[0]
@@ -289,11 +283,11 @@ class AlbionCapeCalculatorApp:
             ]
         except FileNotFoundError:
             img_names = []
-        # If none, fall back to DB-detected types
         return img_names or sorted({name.split(" ", 1)[1].split(".")[0] for name in ALL_CAPE_ITEMS})
 
     def _on_item_change(self):
         self._update_image_preview(self.selected_item.get())
+        self.manual_overrides.clear()
         self.refresh_data()
 
     def _update_image_preview(self, item_name: str):
@@ -325,25 +319,36 @@ class AlbionCapeCalculatorApp:
             try:
                 cape_ids, base_ids, crest_ids, heart_ids = get_active_ids_by_cape_type(SELECTED_ITEM)
                 if not cape_ids:
-                    # No data for this type; just clear table and show status
-                    self.root.after(0, lambda: self._populate_table([]))
+                    def apply_clear():
+                        self.last_cape_ids = []
+                        self.last_cape_prices = {}
+                        self.last_base_prices = {}
+                        self.last_crest_prices = {}
+                        self.last_heart_prices = {}
+                        self._populate_table_from_cache()
+                    self.root.after(0, apply_clear)
                     self.root.after(0, lambda: self._on_error(Exception("No data for this cape type in DB")))
                     return
 
                 cape_prices = get_buy_prices_max(cape_ids, "Black Market")
-                base_prices = get_sell_prices_min(base_ids, BASE_CAPE_SELECTED_CITY)
-                crest_prices = get_sell_prices_min(crest_ids, ARTIFACT_SELECTED_CITY)
-                heart_prices = get_sell_prices_min(heart_ids, HEART_SELECTED_CITY)
+                if self.use_buy_prices_var.get():
+                    base_prices = get_buy_prices_max(base_ids, BASE_CAPE_SELECTED_CITY)
+                    crest_prices = get_buy_prices_max(crest_ids, ARTIFACT_SELECTED_CITY)
+                    heart_prices = get_buy_prices_max(heart_ids, HEART_SELECTED_CITY)
+                else:
+                    base_prices = get_sell_prices_min(base_ids, BASE_CAPE_SELECTED_CITY)
+                    crest_prices = get_sell_prices_min(crest_ids, ARTIFACT_SELECTED_CITY)
+                    heart_prices = get_sell_prices_min(heart_ids, HEART_SELECTED_CITY)
 
-                rows = []
-                for cape_id in cape_ids:
-                    data = build_row_for_cape(
-                        cape_id, base_prices, crest_prices, heart_prices, cape_prices, float(self.taxes_var.get())
-                    )
-                    display_name = ITEM_ID_TO_NAME.get(cape_id, cape_id)
-                    rows.append((cape_id, display_name, data))
+                def apply_update():
+                    self.last_cape_ids = cape_ids
+                    self.last_cape_prices = cape_prices
+                    self.last_base_prices = base_prices
+                    self.last_crest_prices = crest_prices
+                    self.last_heart_prices = heart_prices
+                    self._populate_table_from_cache()
 
-                self.root.after(0, lambda: self._populate_table(rows))
+                self.root.after(0, apply_update)
             except Exception as e:
                 self.root.after(0, lambda: self._on_error(e))
 
@@ -353,51 +358,119 @@ class AlbionCapeCalculatorApp:
         self.status_var.set(f"Error: {err}")
         self.refresh_btn.configure(state=tk.NORMAL)
 
-    def _populate_table(self, rows: list[tuple[str, str, list]]):
+    def _populate_table_from_cache(self):
         for iid in self.tree.get_children():
             self.tree.delete(iid)
 
-        for idx, (cape_id, display_name, data) in enumerate(rows):
-            cape_price, crest_price, heart_price, heart_qty, base_price, total_cost, profit, roi = data
+        for cape_id in self.last_cape_ids:
+            display_name = ITEM_ID_TO_NAME.get(cape_id, cape_id)
+            values, tags = self._compute_row_values(cape_id, display_name)
+            self.tree.insert("", "end", iid=cape_id, values=values, tags=tuple(tags))
 
-            def fmt(v):
-                try:
-                    iv = int(v)
-                    return "-" if iv == 0 else f"{iv:,}"
-                except Exception:
-                    return v
-
-            tags = []
-            if profit < 0:
-                tags.append("profit_neg")
-            elif profit > 0:
-                tags.append("profit_pos")
-            if idx % 2 == 1:
-                tags.append("odd")
-
-            self.tree.insert(
-                "",
-                "end",
-                iid=cape_id,
-                values=(
-                    display_name,
-                    fmt(cape_price),
-                    fmt(crest_price),
-                    fmt(heart_price),
-                    heart_qty,
-                    fmt(base_price),
-                    fmt(total_cost),
-                    fmt(profit),
-                    f"{roi:.2f}%",
-                ),
-                tags=tuple(tags),
-            )
-
-        if rows:
-            self.status_var.set(f"Loaded {len(rows)} rows. Click headers to sort.")
+        if self.last_cape_ids:
+            self.status_var.set(f"Loaded {len(self.last_cape_ids)} rows. Click headers to sort.")
         else:
             self.status_var.set("No rows to display for this selection.")
         self.refresh_btn.configure(state=tk.NORMAL)
+
+    def _compute_row_values(self, cape_id: str, display_name: str) -> tuple[tuple, list[str]]:
+        base_cape_id, crest_id, heart_id, heart_qty = self._get_components(cape_id)
+
+        cape_price = int(self.last_cape_prices.get(cape_id, 0) or 0)
+        base_price = int(self.last_base_prices.get(base_cape_id, 0) or 0)
+        crest_price_api = int(self.last_crest_prices.get(crest_id, 0) or 0)
+        heart_price_api = int(self.last_heart_prices.get(heart_id, 0) or 0)
+
+        overrides = self.manual_overrides.get(cape_id, {})
+        crest_manual_val = overrides.get("crest_manual")
+        heart_manual_val = overrides.get("heart_manual")
+
+        crest_effective = int(crest_manual_val) if crest_manual_val is not None else crest_price_api
+        heart_effective = int(heart_manual_val) if heart_manual_val is not None else heart_price_api
+
+        total_cost = get_total_cost(base_price, crest_effective, heart_effective, heart_qty)
+        profit = calc_profit(cape_price, base_price, crest_effective, heart_effective, heart_qty, float(self.taxes_var.get()))
+        roi = calc_roi(cape_price, base_price, crest_effective, heart_effective, heart_qty, float(self.taxes_var.get()))
+
+        def fmt(v):
+            try:
+                iv = int(v)
+                return "-" if iv == 0 else f"{iv:,}"
+            except Exception:
+                return v
+
+        values = (
+            display_name,
+            fmt(cape_price),
+            fmt(crest_price_api),
+            "" if crest_manual_val is None else f"{int(crest_manual_val):,}",
+            fmt(heart_price_api),
+            "" if heart_manual_val is None else f"{int(heart_manual_val):,}",
+            heart_qty,
+            fmt(base_price),
+            fmt(total_cost),
+            fmt(profit),
+            f"{roi:.2f}%",
+        )
+
+        tags: list[str] = []
+        if profit < 0:
+            tags.append("profit_neg")
+        elif profit > 0:
+            tags.append("profit_pos")
+        return values, tags
+
+    def _get_components(self, cape_id: str) -> tuple[str, str, str, int]:
+        base_cape_id = crest_id = heart_id = ""
+        heart_qty = 1
+        for name, data in ALL_CAPE_ITEMS.items():
+            if get_cape_id_by_name(name) == cape_id:
+                base_cape_id = data["base_cape"]
+                crest_id = data["crest"]
+                heart_id = data["heart"]["id"]
+                heart_qty = int(data["heart"].get("quantity", 1))
+                break
+        return base_cape_id, crest_id, heart_id, heart_qty
+
+    def _begin_cell_edit(self, event):
+        region = self.tree.identify("region", event.x, event.y)
+        if region != "cell":
+            return
+        row_id = self.tree.identify_row(event.y)
+        col_id = self.tree.identify_column(event.x)
+        if not row_id or not col_id:
+            return
+        col_index = int(col_id.replace("#", "")) - 1
+        col_name = self.tree["columns"][col_index]
+        if col_name not in ("crest_manual", "heart_manual"):
+            return
+
+        x, y, w, h = self.tree.bbox(row_id, col_id)
+        curr_val = self.tree.set(row_id, col_name)
+        entry = ttk.Entry(self.tree)
+        entry.place(x=x, y=y, width=w, height=h)
+        if curr_val:
+            entry.insert(0, curr_val.replace(",", ""))
+        entry.focus_set()
+
+        def finish(commit: bool):
+            try:
+                new_val = entry.get().strip()
+                if not commit:
+                    return
+                if new_val == "":
+                    self.manual_overrides.setdefault(row_id, {})[col_name] = None
+                else:
+                    self.manual_overrides.setdefault(row_id, {})[col_name] = int(float(new_val))
+                display_name = self.tree.set(row_id, "name")
+                values, tags = self._compute_row_values(row_id, display_name)
+                self.tree.item(row_id, values=values, tags=tuple(tags))
+            finally:
+                entry.destroy()
+
+        entry.bind("<Return>", lambda e: finish(True))
+        entry.bind("<Escape>", lambda e: finish(False))
+        entry.bind("<FocusOut>", lambda e: finish(True))
 
     def _sort_by(self, col_key: str, descending: bool):
         items = [(self.tree.set(k, col_key), k) for k in self.tree.get_children("")]
@@ -409,7 +482,10 @@ class AlbionCapeCalculatorApp:
                 except Exception:
                     return 0.0
             try:
-                return int(str(v).replace(",", ""))
+                s = str(v).replace(",", "").strip()
+                if s == "-" or s == "":
+                    return 0
+                return int(float(s))
             except Exception:
                 return v
 
